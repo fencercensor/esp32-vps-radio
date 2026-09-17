@@ -4,7 +4,29 @@
 
 > هذه النسخة سلكية بالكامل. البلوتوث غير مستخدم في مسار الراديو.
 
-![التوصيل الكامل](docs/images/wiring-1920x1080.png)
+## صور التوصيل
+
+الصور التالية مأخوذة من ملف التوصيل الأصلي: [تحميل connection.pdf](docs/connection.pdf).
+
+### لوحة ESP32 المستخدمة
+
+![لوحة ESP32 المستخدمة](docs/images/connection-01-esp32.png)
+
+### الأزرار ومقاومة التحكم في الصوت
+
+![توصيل الأزرار ومقاومة التحكم](docs/images/connection-02-controls.png)
+
+### دائرة قناة الصوت اليمين
+
+![دائرة قناة الصوت اليمين](docs/images/connection-03-right-channel.png)
+
+### دائرة قناة الصوت الشمال
+
+![دائرة قناة الصوت الشمال](docs/images/connection-04-left-channel.png)
+
+### توصيل القناتين بسوكت AUX
+
+![توصيل سوكت AUX](docs/images/connection-05-aux.png)
 
 ## ماذا يفعل المشروع؟
 
@@ -37,6 +59,7 @@ GPIO26 → فلتر القناة اليمين  → AUX R
 - `firmware/`: كود ESP32 وفك ترميز IMA-ADPCM وملف إعداد نموذجي.
 - `server/`: بوابة البث ولوحة الإدارة وواجهات الإعداد والفحص.
 - `docs/WIRING_AR.md`: التوصيل الكامل خطوة بخطوة.
+- `docs/connection.pdf`: ملف صور التوصيل الأصلي المكوّن من خمس صفحات.
 - `docs/FIRMWARE_SETUP_AR.md`: تجهيز وبناء ورفع كود ESP32.
 - `docs/SERVER_SETUP_AR.md`: تثبيت ملفات السيرفر وFFmpeg ولوحة الإدارة.
 - `SECURITY.md`: قواعد الأمان والملفات التي يجب عدم نشرها.

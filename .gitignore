@@ -16,6 +16,7 @@ server/bin/ffmpeg
 *.o
 *.log
 build/
+tmp/
 .arduinoIDE/
 .DS_Store
 .idea/
