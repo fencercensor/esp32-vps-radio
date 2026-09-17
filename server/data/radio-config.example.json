@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "updated_at": "2026-01-01T00:00:00Z",
+  "stations": [
+    {
+      "id": "cairo",
+      "name": "إذاعة القرآن الكريم من القاهرة",
+      "enabled": true,
+      "sources": [
+        "http://stream.radiojar.com/8s5u5tpdtwzuv"
+      ]
+    },
+    {
+      "id": "roqiah",
+      "name": "الرقية الشرعية",
+      "enabled": true,
+      "sources": [
+        "https://qurango.net/radio/roqiah"
+      ]
+    }
+  ]
+}

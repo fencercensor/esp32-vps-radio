@@ -1,0 +1,22 @@
+# Local/private firmware configuration
+firmware/radio_config.h
+
+# Runtime server state and credentials
+server/data/admin.json
+server/data/radio-config.json
+server/data/*.tmp-*
+
+# Downloaded third-party executable
+server/bin/ffmpeg
+
+# Build products, logs and editor/OS files
+*.bin
+*.elf
+*.map
+*.o
+*.log
+build/
+.arduinoIDE/
+.DS_Store
+.idea/
+.vscode/

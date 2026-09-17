@@ -1,0 +1,20 @@
+name: Security check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tracked files and common secret patterns
+        run: bash scripts/security-check.sh
+      - name: Check shell syntax
+        run: bash -n scripts/security-check.sh
+      - name: Check PHP syntax
+        run: find server -type f -name '*.php' -print0 | xargs -0 -n1 php -l
