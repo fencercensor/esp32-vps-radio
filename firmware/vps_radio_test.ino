@@ -3,17 +3,23 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 #include <atomic>
+#include <driver/adc.h>
 #include <driver/i2s.h>
 #include <lwip/sockets.h>
 
 #include "ima_adpcm.h"
+#include "lossless_transport.h"
 #include "radio_config.h"
 
 namespace {
 
 constexpr char kSetupApName[] = "ESP-Radio-Setup";
 constexpr char kSetupApPassword[] = RADIO_SETUP_AP_PASSWORD;
+static_assert(sizeof(kSetupApPassword) >= 9 && sizeof(kSetupApPassword) <= 64,
+              "Setup AP password must contain 8 to 63 characters.");
 constexpr char kGatewayHost[] = RADIO_GATEWAY_HOST;
 constexpr char kGatewayHttpHost[] = RADIO_GATEWAY_HTTP_HOST;
 constexpr uint16_t kGatewayPort = RADIO_GATEWAY_PORT;
@@ -88,11 +94,17 @@ std::atomic<uint32_t> decodedBlocks{0};
 std::atomic<uint32_t> droppedInputBlocks{0};
 std::atomic<uint32_t> backpressureWaits{0};
 std::atomic<uint64_t> networkBytes{0};
+std::atomic<uint64_t> uncompressedBytes{0};
+std::atomic<uint32_t> transportFrames{0};
+uint8_t *transportWire = nullptr;
+uint8_t *transportAudio = nullptr;
 std::atomic<uint32_t> networkReconnects{0};
 std::atomic<uint32_t> streamGeneration{1};
 std::atomic<uint8_t> selectedStation{0};
 std::atomic<uint8_t> volumePercent{100};
 std::atomic<bool> radioPaused{false};
+std::atomic<bool> silentStandby{false};
+bool playbackSuspended() { return radioPaused.load() || silentStandby.load(); }
 // -1 repeats one sample occasionally, 0 consumes exactly one input sample per
 // output frame, +1 drops one occasionally. This keeps the independent VPS and
 // DAC clocks from slowly filling or draining the PCM queue.
@@ -389,7 +401,7 @@ void wiredAudioTask(void *) {
           encodedWriteCount.load(std::memory_order_acquire) -
           encodedReadCount.load(std::memory_order_relaxed);
       bool primed = playbackPrimed.load();
-      if (!radioPaused.load() && !primed &&
+      if (!playbackSuspended() && !primed &&
           queuedBlocks >= kEncodedStartBlocks &&
           takeNextSample(fromSample) && takeNextSample(toSample)) {
         spanPosition = 0;
@@ -401,7 +413,7 @@ void wiredAudioTask(void *) {
       }
 
       int16_t output = 0;
-      if (!radioPaused.load() && primed && haveSpan) {
+      if (!playbackSuspended() && primed && haveSpan) {
         const int32_t difference =
             static_cast<int32_t>(toSample) - fromSample;
         output = static_cast<int16_t>(
@@ -482,11 +494,13 @@ void wiredAudioTask(void *) {
   }
 }
 
-bool readExact(WiFiClient &client, uint8_t *destination, size_t length,
-               uint32_t timeoutMs = 15000) {
+bool readExact(Client &client, uint8_t *destination, size_t length,
+               uint32_t timeoutMs = 15000, uint32_t generation = 0) {
   size_t received = 0;
   uint32_t lastProgressAt = millis();
   while (received < length) {
+    if (generation != 0 && (playbackSuspended() ||
+        streamGeneration.load() != generation || wifiPortalActive.load())) return false;
     const int available = client.available();
     if (available > 0) {
       const size_t wanted = min(length - received, static_cast<size_t>(available));
@@ -503,7 +517,7 @@ bool readExact(WiFiClient &client, uint8_t *destination, size_t length,
   return true;
 }
 
-bool skipExact(WiFiClient &client, uint32_t length) {
+bool skipExact(Client &client, uint32_t length) {
   uint8_t scratch[64];
   while (length != 0) {
     const size_t part = min(static_cast<uint32_t>(sizeof(scratch)), length);
@@ -513,7 +527,7 @@ bool skipExact(WiFiClient &client, uint32_t length) {
   return true;
 }
 
-bool readLine(WiFiClient &client, char *line, size_t capacity) {
+bool readLine(Client &client, char *line, size_t capacity) {
   if (capacity == 0) return false;
   size_t length = 0;
   uint32_t lastProgressAt = millis();
@@ -535,13 +549,16 @@ bool readLine(WiFiClient &client, char *line, size_t capacity) {
   return false;
 }
 
-bool readHttpHeaders(WiFiClient &client,
-                     uint32_t *announcedConfigVersion = nullptr) {
+bool readHttpHeaders(Client &client,
+                     uint32_t *announcedConfigVersion = nullptr,
+                     bool *lossless = nullptr) {
   char line[192];
   if (!readLine(client, line, sizeof(line)) || strstr(line, " 200 ") == nullptr)
     return false;
   while (readLine(client, line, sizeof(line))) {
     if (line[0] == '\0') return true;
+    if (lossless != nullptr && strcasecmp(line, "X-Radio-Transport: rz1") == 0)
+      *lossless = true;
     constexpr char kConfigVersionHeader[] = "X-Radio-Config-Version:";
     if (announcedConfigVersion != nullptr &&
         strncasecmp(line, kConfigVersionHeader,
@@ -553,10 +570,24 @@ bool readHttpHeaders(WiFiClient &client,
   return false;
 }
 
+bool connectGateway(WiFiClientSecure &client) {
+  // Connect to the fixed origin IP, but send the domain as TLS SNI and verify
+  // both its name and CA chain. Never downgrade to unencrypted HTTP.
+  if (time(nullptr) < 1767225600) {
+    Serial.println("[TLS] waiting for network time before certificate validation");
+    return false;
+  }
+  IPAddress origin;
+  if (!origin.fromString(kGatewayHost)) return false;
+  client.setTimeout(12000);
+  client.setHandshakeTimeout(15);
+  return client.connect(origin, kGatewayPort, kGatewayHttpHost,
+      RADIO_GATEWAY_CA, nullptr, nullptr);
+}
+
 bool fetchRemoteRadioConfig() {
-  WiFiClient client;
-  client.setNoDelay(true);
-  if (!client.connect(kGatewayHost, kGatewayPort)) {
+  WiFiClientSecure client;
+  if (!connectGateway(client)) {
     Serial.println("[CONFIG] server connection failed");
     return false;
   }
@@ -626,7 +657,7 @@ bool fetchRemoteRadioConfig() {
   return true;
 }
 
-bool readWavHeader(WiFiClient &client, WavFormat &format) {
+bool readWavHeader(Client &client, WavFormat &format) {
   uint8_t riff[12];
   if (!readExact(client, riff, sizeof(riff)) || memcmp(riff, "RIFF", 4) != 0 ||
       memcmp(riff + 8, "WAVE", 4) != 0)
@@ -670,7 +701,7 @@ bool pushEncodedBlock(const EncodedBlock &block, uint32_t generation) {
       block.generation != generation)
     return false;
   bool recordedWait = false;
-  while (WiFi.isConnected() && !radioPaused.load() &&
+  while (WiFi.isConnected() && !playbackSuspended() &&
          streamGeneration.load() == generation) {
     const uint32_t write =
         encodedWriteCount.load(std::memory_order_relaxed);
@@ -681,7 +712,7 @@ bool pushEncodedBlock(const EncodedBlock &block, uint32_t generation) {
       destination.generation = block.generation;
       destination.size = block.size;
       memcpy(destination.data, block.data, block.size);
-      if (radioPaused.load() || streamGeneration.load() != generation)
+      if (playbackSuspended() || streamGeneration.load() != generation)
         return false;
       encodedWriteCount.store(write + 1, std::memory_order_release);
       return true;
@@ -698,52 +729,68 @@ bool pushEncodedBlock(const EncodedBlock &block, uint32_t generation) {
 }
 
 void networkTask(void *) {
+  transportWire = static_cast<uint8_t *>(malloc(RadioLossless::kMaxBytes));
+  transportAudio = static_cast<uint8_t *>(malloc(RadioLossless::kMaxBytes));
+  if (transportWire == nullptr || transportAudio == nullptr) {
+    free(transportWire); free(transportAudio);
+    transportWire = transportAudio = nullptr;
+    networkTaskStarted = false;
+    Serial.println("[NET] transport buffer allocation failed; retrying");
+    vTaskDelete(nullptr);
+    return;
+  }
+  uint32_t retryMs = 1000;
   while (true) {
-    if (!WiFi.isConnected() || radioPaused.load() || wifiPortalActive) {
+    if (!WiFi.isConnected() || playbackSuspended() || wifiPortalActive) {
       vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
 
+    // Only one TLS socket at a time: finish the small catalogue request before
+    // opening audio. This preserves memory for TLS and the full audio queue.
+    fetchRemoteRadioConfig();
+    if (playbackSuspended() || wifiPortalActive.load()) continue;
     const uint32_t activeGeneration = streamGeneration.load();
     const uint8_t stationIndex = selectedStation.load();
     char stationId[sizeof(stations[0].id)];
     strlcpy(stationId, stations[stationIndex].id, sizeof(stationId));
-    WiFiClient client;
-    client.setNoDelay(true);
+    WiFiClientSecure client;
     Serial.printf("[NET] connecting station=%s host=%s\n", stationId,
                   kGatewayHttpHost);
-    if (!client.connect(kGatewayHost, kGatewayPort)) {
+    if (!connectGateway(client)) {
       ++networkReconnects;
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(retryMs));
+      retryMs = min(retryMs * 2, uint32_t(30000));
       continue;
     }
     int receiveBufferBytes = 8192;
     client.setSocketOption(SO_RCVBUF, reinterpret_cast<char *>(&receiveBufferBytes),
                            sizeof(receiveBufferBytes));
 
-    client.printf("GET /esp-radio/gateway.php?station=%s&client=wired HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
+    client.printf("GET /esp-radio/gateway.php?station=%s&client=wired&transport=rz1 HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
                   stationId, kGatewayHttpHost);
     uint32_t announcedConfigVersion = 0;
-    if (!readHttpHeaders(client, &announcedConfigVersion)) {
+    bool lossless = false;
+    if (!readHttpHeaders(client, &announcedConfigVersion, &lossless)) {
       client.stop();
       ++networkReconnects;
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(retryMs));
+      retryMs = min(retryMs * 2, uint32_t(30000));
       continue;
     }
     if (announcedConfigVersion != 0 &&
         announcedConfigVersion != radioConfigVersion) {
       Serial.printf("[CONFIG] server version=%u cached=%u; updating\n",
                     announcedConfigVersion, radioConfigVersion);
-      // Keep this audio socket open while the small catalogue request runs.
-      // Saving or adding a station must not drain the local audio queue or
-      // restart the ESP. The current station continues until the listener
-      // changes it; the new catalogue is used for the next selection.
-      fetchRemoteRadioConfig();
+      // A catalogue save raced this connection. Keep the current audio;
+      // refresh before the next connection rather than allocate a second TLS
+      // session while playback is active.
     }
 
     WavFormat format;
     if (!readWavHeader(client, format) ||
-        !validateWavFormat(format)) {
+        !validateWavFormat(format) ||
+        (lossless && format.blockAlign != RadioLossless::kBlockBytes)) {
       Serial.printf("[NET] invalid stream fmt=%u ch=%u rate=%u block=%u bits=%u samples=%u\n",
                     format.formatTag, format.channels, format.sampleRate,
                     format.blockAlign, format.bitsPerSample,
@@ -754,23 +801,47 @@ void networkTask(void *) {
       continue;
     }
 
-    Serial.printf("[NET] stream ready channels=%u block=%u samples=%u\n",
-                  format.channels, format.blockAlign, format.samplesPerBlock);
+    retryMs = 1000;
+    Serial.printf("[NET] stream ready channels=%u block=%u samples=%u tls=verified transport=%s\n",
+                  format.channels, format.blockAlign, format.samplesPerBlock,
+                  lossless ? "rz1" : "raw");
     while ((client.connected() || client.available() > 0) &&
            streamGeneration.load() == activeGeneration &&
-           !radioPaused.load()) {
+           !playbackSuspended()) {
       EncodedBlock block;
       block.generation = activeGeneration;
       block.size = format.blockAlign;
-      if (!readExact(client, block.data, block.size)) break;
-      if (!pushEncodedBlock(block, activeGeneration)) break;
-      networkBytes.fetch_add(block.size);
-      if (!WiFi.isConnected() || radioPaused.load() ||
+      if (lossless) {
+        uint8_t header[RadioLossless::kHeaderBytes];
+        RadioLossless::Frame frame;
+        if (!readExact(client, header, sizeof(header), 15000, activeGeneration) ||
+            !RadioLossless::parseHeader(header, frame) ||
+            !readExact(client, transportWire, frame.wireBytes, 15000, activeGeneration) ||
+            !RadioLossless::decode(frame, transportWire, transportAudio)) {
+          Serial.println("[NET] incomplete or invalid lossless frame; reconnecting safely");
+          break;
+        }
+        networkBytes.fetch_add(sizeof(header) + frame.wireBytes);
+        uncompressedBytes.fetch_add(frame.rawBytes);
+        ++transportFrames;
+        bool accepted = true;
+        for (uint8_t index = 0; index < frame.blocks; ++index) {
+          memcpy(block.data, transportAudio + index * block.size, block.size);
+          if (!pushEncodedBlock(block, activeGeneration)) { accepted = false; break; }
+        }
+        if (!accepted) break;
+      } else {
+        if (!readExact(client, block.data, block.size, 15000, activeGeneration)) break;
+        networkBytes.fetch_add(block.size);
+        uncompressedBytes.fetch_add(block.size);
+        if (!pushEncodedBlock(block, activeGeneration)) break;
+      }
+      if (!WiFi.isConnected() || playbackSuspended() ||
           streamGeneration.load() != activeGeneration)
         break;
     }
     client.stop();
-    if (streamGeneration.load() == activeGeneration && !radioPaused.load()) {
+    if (streamGeneration.load() == activeGeneration && !playbackSuspended()) {
       ++networkReconnects;
       Serial.println("[NET] stream ended; reconnecting");
     }
@@ -824,17 +895,17 @@ String wifiSetupPage(const String &notice = "") {
   String rows;
   for (uint8_t index = 0; index < kMaxWifiNetworks; ++index) {
     const String ssid = index < wifiNetworkCount ? wifiNetworks[index].ssid : "";
-    rows += "<section><strong>الشبكة " + String(index + 1) +
+    rows += "<section><strong>Network " + String(index + 1) +
             "</strong><input name=\"ssid" + String(index) +
             "\" list=\"scanned\" value=\"" + htmlEscape(ssid) +
-            "\" placeholder=\"اختر أو اكتب اسم الشبكة\"><input name=\"pass" +
+            "\" placeholder=\"Select or enter a network name\"><input name=\"pass" +
             String(index) +
-            "\" type=\"password\" placeholder=\"كلمة المرور — اتركها فارغة للاحتفاظ بالحالية\"></section>";
+            "\" type=\"password\" placeholder=\"Password - leave blank to keep the saved password\"></section>";
   }
-  return "<!doctype html><html lang=\"ar\" dir=\"rtl\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>إعداد Wi-Fi للراديو</title><style>body{margin:0;background:#07101c;color:#eef6ff;font:16px Tahoma,sans-serif}main{width:min(680px,calc(100% - 24px));margin:24px auto}h1{color:#38bdf8}section{padding:14px;margin:10px 0;background:#101c2c;border:1px solid #2a3c52;border-radius:14px}input{display:block;width:100%;box-sizing:border-box;margin-top:9px;padding:12px;border:1px solid #38506b;border-radius:10px;background:#080f19;color:white}button{width:100%;padding:13px;border:0;border-radius:11px;background:#38bdf8;color:#03121c;font-weight:bold;font-size:16px}.note{padding:12px;border-radius:10px;background:#123528;color:#bbf7d0}</style></head><body><main><h1>إعداد شبكات راديو ESP</h1><p>احفظ حتى خمس شبكات. سيجربها الجهاز بالترتيب عند انقطاع الشبكة الأساسية.</p>" +
+  return "<!doctype html><html lang=\"en\" dir=\"ltr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Radio Wi-Fi setup</title><style>body{margin:0;background:#07101c;color:#eef6ff;font:16px Tahoma,sans-serif}main{width:min(680px,calc(100% - 24px));margin:24px auto}h1{color:#38bdf8}section{padding:14px;margin:10px 0;background:#101c2c;border:1px solid #2a3c52;border-radius:14px}input{display:block;width:100%;box-sizing:border-box;margin-top:9px;padding:12px;border:1px solid #38506b;border-radius:10px;background:#080f19;color:white}button{width:100%;padding:13px;border:0;border-radius:11px;background:#38bdf8;color:#03121c;font-weight:bold;font-size:16px}.note{padding:12px;border-radius:10px;background:#123528;color:#bbf7d0}</style></head><body><main><h1>ESP Radio Wi-Fi setup</h1><p>Save up to five networks. The radio tries them in order when the current network disconnects.</p>" +
          (notice.isEmpty() ? "" : "<p class=\"note\">" + htmlEscape(notice) + "</p>") +
          "<form method=\"post\" action=\"/save\"><datalist id=\"scanned\">" + options +
-         "</datalist>" + rows + "<button>حفظ وإعادة تشغيل الراديو</button></form></main></body></html>";
+         "</datalist>" + rows + "<button>Save and restart radio</button></form></main></body></html>";
 }
 
 void startWifiPortal() {
@@ -871,14 +942,14 @@ void startWifiPortal() {
     }
     if (count == 0) {
       setupServer.send(400, "text/html; charset=utf-8",
-                       wifiSetupPage("أضف شبكة واحدة على الأقل."));
+                       wifiSetupPage("Add at least one network."));
       return;
     }
     wifiNetworkCount = count;
     for (uint8_t index = 0; index < count; ++index) wifiNetworks[index] = updated[index];
     saveWifiNetworks();
     setupServer.send(200, "text/html; charset=utf-8",
-                     wifiSetupPage("تم الحفظ. سيعاد تشغيل الجهاز خلال ثانيتين."));
+                     wifiSetupPage("Saved. The radio will restart in two seconds."));
     restartAt = millis() + 2000;
     restartScheduled = true;
   });
@@ -928,7 +999,9 @@ void updateVolume(bool force = false) {
   if (!force && millis() - lastReadAt < 40) return;
   lastReadAt = millis();
 
-  const int reading = analogRead(kVolumePin);
+  // The internal I2S DAC uses the legacy peripheral driver. Keep ADC1 on that
+  // same driver: Arduino 3.x analogRead links the incompatible oneshot driver.
+  const int reading = adc1_get_raw(ADC1_CHANNEL_6);  // GPIO34
   if (filteredPotReading == 0.0f)
     filteredPotReading = reading;
   else
@@ -951,14 +1024,15 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println();
-  Serial.println("=== Managed VPS wired AUX radio 2026-09-13.33 ===");
-  Serial.printf("Gateway: http://%s:%u host=%s\n", kGatewayHost,
+  Serial.println("=== Managed VPS wired AUX radio 2026-10-13.35 TLS + lossless ===");
+  Serial.printf("Gateway: https://%s:%u host=%s\n", kGatewayHost,
                 kGatewayPort, kGatewayHttpHost);
 
   previousButton.begin();
   playPauseButton.begin();
   nextButton.begin();
-  analogReadResolution(12);
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11);
   pinMode(kVolumePin, INPUT);
 
   loadCachedRadioConfig();
@@ -976,7 +1050,7 @@ void setup() {
     selectedStation = savedIndex;
     settings.end();
   }
-  filteredPotReading = analogRead(kVolumePin);
+  filteredPotReading = adc1_get_raw(ADC1_CHANNEL_6);
   updateVolume(true);
   Serial.printf("[RADIO] station=%u %s\n", selectedStation.load(),
                 stations[selectedStation.load()].name);
@@ -1006,6 +1080,26 @@ void setup() {
 
 void loop() {
   static uint32_t lastReportAt = 0;
+  static uint32_t muteStartedAt = 0;
+  static bool networkTimeStarted = false;
+  if (WiFi.isConnected() && !networkTimeStarted) {
+    configTime(0, 0, "time.cloudflare.com", "time.google.com", "pool.ntp.org");
+    networkTimeStarted = true;
+  }
+  if (volumePercent.load() == 0 && !radioPaused.load()) {
+    if (muteStartedAt == 0) muteStartedAt = millis();
+    if (!silentStandby.load() && millis() - muteStartedAt >= 10000) {
+      silentStandby = true;
+      restartStreamBuffer();
+      Serial.println("[DATA] muted for 10s; live download stopped");
+    }
+  } else {
+    muteStartedAt = 0;
+    if (silentStandby.exchange(false)) {
+      restartStreamBuffer();
+      Serial.println("[DATA] volume restored; resuming live stream");
+    }
+  }
   static uint32_t wifiConnectedAt = 0;
   static uint32_t wifiComboStartedAt = 0;
   updateVolume();
@@ -1058,7 +1152,7 @@ void loop() {
     networkTaskStarted = true;
     // Keep Wi-Fi/TCP/ADPCM work on the Arduino application core while the
     // small blocking DAC writer owns core 0.
-    if (xTaskCreatePinnedToCore(networkTask, "radio-network", 6144, nullptr, 1,
+    if (xTaskCreatePinnedToCore(networkTask, "radio-network", 12288, nullptr, 1,
                                 nullptr, 1) != pdPASS) {
       networkTaskStarted = false;
       Serial.println("[NET] task allocation failed");
@@ -1073,7 +1167,7 @@ void loop() {
         queuedBlocks * (kMaxDecodedSamples * 1000UL / kInputSampleRate);
     Serial.printf(
         "[STATUS] station=%u paused=%d volume=%u wired=%d wifi=%d rssi=%d primed=%d buffer_blocks=%u buffer_ms=%u "
-        "trim=%d cfg=%u stations=%u writes=%u frames=%llu blocks=%u dropped=%u waits=%u bytes=%llu underruns=%u reconnects=%u heap=%u\n",
+        "trim=%d cfg=%u stations=%u writes=%u frames=%llu blocks=%u dropped=%u waits=%u bytes=%llu underruns=%u reconnects=%u heap=%u raw_bytes=%llu rz_frames=%u standby=%d\n",
         selectedStation.load(), radioPaused.load(), volumePercent.load(),
         wiredAudioReady.load() && audioOutputTaskStarted, WiFi.status(),
         WiFi.isConnected() ? WiFi.RSSI() : 0, playbackPrimed.load(),
@@ -1082,7 +1176,7 @@ void loop() {
         static_cast<int>(clockTrimMode.load()), radioConfigVersion, stationCount,
         audioWrites.load(), outputFrames.load(), decodedBlocks.load(),
         droppedInputBlocks.load(), backpressureWaits.load(), networkBytes.load(), underruns.load(), networkReconnects.load(),
-        ESP.getFreeHeap());
+        ESP.getFreeHeap(), uncompressedBytes.load(), transportFrames.load(), silentStandby.load());
   }
   delay(20);
 }

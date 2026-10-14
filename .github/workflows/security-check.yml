@@ -18,3 +18,7 @@ jobs:
         run: bash -n scripts/security-check.sh
       - name: Check PHP syntax
         run: find server -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Check test PHP syntax
+        run: find tests -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Verify lossless transport with synthetic fixtures
+        run: python3 tests/run_transport_tests.py

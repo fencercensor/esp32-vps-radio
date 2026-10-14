@@ -18,7 +18,7 @@ function defaultRadioConfig(): array
         'stations' => [
             [
                 'id' => 'cairo',
-                'name' => 'إذاعة القرآن الكريم من القاهرة',
+                'name' => 'Quran Radio Cairo',
                 'enabled' => true,
                 'sources' => [
                     'http://stream.radiojar.com/8s5u5tpdtwzuv',
@@ -26,7 +26,7 @@ function defaultRadioConfig(): array
             ],
             [
                 'id' => 'roqiah',
-                'name' => 'الرقية الشرعية',
+                'name' => 'Ruqyah Shariah',
                 'enabled' => true,
                 'sources' => [
                     'https://qurango.net/radio/roqiah',
@@ -40,31 +40,31 @@ function normalizeRadioConfig(array $input): array
 {
     $rawStations = $input['stations'] ?? [];
     if (!is_array($rawStations) || count($rawStations) < 1 || count($rawStations) > 16) {
-        throw new InvalidArgumentException('يجب إضافة محطة واحدة على الأقل، والحد الأقصى 16 محطة.');
+        throw new InvalidArgumentException('Add between 1 and 16 stations.');
     }
 
     $stations = [];
     $seen = [];
     foreach ($rawStations as $rawStation) {
         if (!is_array($rawStation)) {
-            throw new InvalidArgumentException('بيانات إحدى المحطات غير صحيحة.');
+            throw new InvalidArgumentException('Invalid station data.');
         }
         $id = strtolower(trim((string) ($rawStation['id'] ?? '')));
         $name = trim((string) ($rawStation['name'] ?? ''));
         if (!preg_match('/^[a-z0-9][a-z0-9_-]{0,31}$/', $id)) {
-            throw new InvalidArgumentException('معرّف المحطة يقبل الحروف الإنجليزية الصغيرة والأرقام و - و _ فقط.');
+            throw new InvalidArgumentException('Station IDs accept lowercase letters, digits, hyphens and underscores only.');
         }
         if (isset($seen[$id])) {
-            throw new InvalidArgumentException('معرّف المحطة مكرر: ' . $id);
+            throw new InvalidArgumentException('Duplicate station ID: ' . $id);
         }
         if ($name === '' || radioTextLength($name) > 60) {
-            throw new InvalidArgumentException('اسم المحطة يجب أن يكون من 1 إلى 60 حرفًا.');
+            throw new InvalidArgumentException('Station names must contain 1 to 60 characters.');
         }
         $seen[$id] = true;
 
         $rawSources = $rawStation['sources'] ?? [];
         if (!is_array($rawSources)) {
-            throw new InvalidArgumentException('روابط المحطة غير صحيحة: ' . $name);
+            throw new InvalidArgumentException('Invalid station sources: ' . $name);
         }
         $sources = [];
         foreach ($rawSources as $rawSource) {
@@ -75,17 +75,17 @@ function normalizeRadioConfig(array $input): array
             $parts = parse_url($source);
             $scheme = strtolower((string) ($parts['scheme'] ?? ''));
             if (($scheme !== 'http' && $scheme !== 'https') || empty($parts['host'])) {
-                throw new InvalidArgumentException('رابط غير صالح في محطة: ' . $name);
+                throw new InvalidArgumentException('Invalid source URL for station: ' . $name);
             }
             if (strlen($source) > 1500) {
-                throw new InvalidArgumentException('أحد روابط المحطة طويل جدًا: ' . $name);
+                throw new InvalidArgumentException('Source URL is too long for station: ' . $name);
             }
             if (!in_array($source, $sources, true)) {
                 $sources[] = $source;
             }
         }
         if (count($sources) < 1 || count($sources) > 12) {
-            throw new InvalidArgumentException('كل محطة تحتاج رابطًا واحدًا على الأقل، والحد الأقصى 12 رابطًا.');
+            throw new InvalidArgumentException('Each station requires 1 to 12 source URLs.');
         }
 
         $stations[] = [
@@ -98,7 +98,7 @@ function normalizeRadioConfig(array $input): array
 
     $enabledCount = count(array_filter($stations, static fn(array $station): bool => $station['enabled']));
     if ($enabledCount < 1) {
-        throw new InvalidArgumentException('يجب تفعيل محطة واحدة على الأقل.');
+        throw new InvalidArgumentException('Enable at least one station.');
     }
 
     return [
@@ -133,16 +133,16 @@ function saveRadioConfig(array $input): array
     $config['updated_at'] = gmdate('c');
 
     if (!is_dir(RADIO_DATA_DIR) && !@mkdir(RADIO_DATA_DIR, 0750, true) && !is_dir(RADIO_DATA_DIR)) {
-        throw new RuntimeException('تعذر إنشاء مجلد البيانات.');
+        throw new RuntimeException('Could not create the data directory.');
     }
     $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     if (!is_string($json)) {
-        throw new RuntimeException('تعذر تجهيز ملف الإعدادات.');
+        throw new RuntimeException('Could not encode the configuration.');
     }
     $temporary = RADIO_CONFIG_FILE . '.tmp-' . bin2hex(random_bytes(5));
     if (@file_put_contents($temporary, $json . "\n", LOCK_EX) === false || !@rename($temporary, RADIO_CONFIG_FILE)) {
         @unlink($temporary);
-        throw new RuntimeException('تعذر حفظ الإعدادات.');
+        throw new RuntimeException('Could not save the configuration.');
     }
     @chmod(RADIO_CONFIG_FILE, 0640);
     return $config;

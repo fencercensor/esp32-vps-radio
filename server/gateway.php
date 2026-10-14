@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/config-store.php';
+require_once __DIR__ . '/lossless.php';
 
 // Long-lived, unbuffered response: one request represents one radio listener.
 ignore_user_abort(false);
@@ -65,6 +66,8 @@ function stopTranscoder($process, array &$pipes): void
 
 $stationId = isset($_GET['station']) ? strtolower((string) $_GET['station']) : '';
 $wiredClient = isset($_GET['client']) && (string) $_GET['client'] === 'wired';
+$losslessClient = $wiredClient && ($_GET['transport'] ?? '') === 'rz1' &&
+    function_exists('gzcompress');
 $outputChannels = 1;
 $radioConfig = loadRadioConfig();
 $station = null;
@@ -106,8 +109,6 @@ foreach ($station['sources'] as $index => $upstream) {
         '-i', $upstream,
         '-vn',
         '-map_metadata', '-1',
-        // Raise the average programme level by a conservative 3 dB while the
-        // look-ahead limiter keeps peaks below full scale before ADPCM encoding.
         '-ac', (string) $outputChannels,
         '-ar', '14700',
         '-c:a', 'adpcm_ima_wav',
@@ -175,6 +176,10 @@ header('X-Audio-Format: ima-adpcm;rate=14700;channels=' . $outputChannels . ';bl
     ';initial=1;prebuffer=' . ($wiredClient ? '3.3s' : '13s'));
 header('X-Source-Index: ' . $chosenIndex);
 header('X-Radio-Config-Version: ' . $configVersion);
+if ($losslessClient) {
+    header('Content-Type: application/vnd.esp-radio.rz1');
+    header('X-Radio-Transport: rz1');
+}
 
 $dataMarker = strpos($firstChunk, 'data');
 if ($dataMarker === false) {
@@ -191,7 +196,9 @@ if (strlen($firstChunk) < $initialLength) {
 // Legacy Bluetooth clients keep exact pacing. Wired clients have no radio
 // coexistence constraint, so TCP backpressure is allowed to fill their larger
 // local queue and rapidly restore it after a short Wi-Fi fade.
-echo substr($firstChunk, 0, $initialLength);
+echo substr($firstChunk, 0, $headerLength);
+$firstAudio = substr($firstChunk, $headerLength, $initialLength - $headerLength);
+echo $losslessClient ? radioLosslessFrame($firstAudio) : $firstAudio;
 flush();
 $streamBuffer = substr($firstChunk, $initialLength);
 $nextSendAt = hrtime(true) + ADPCM_BLOCK_DURATION_NS;
@@ -207,17 +214,19 @@ try {
             $streamBuffer .= $chunk;
         }
 
-        if ($wiredClient && strlen($streamBuffer) >= ADPCM_BLOCK_BYTES) {
+        if ($wiredClient && strlen($streamBuffer) >=
+            ADPCM_BLOCK_BYTES * ($losslessClient ? 8 : 1)) {
             $availableBlocks = intdiv(strlen($streamBuffer), ADPCM_BLOCK_BYTES);
-            $sendBlocks = min(16, $availableBlocks);
+            $sendBlocks = min($losslessClient ? 8 : 16, $availableBlocks);
             $sendBytes = $sendBlocks * ADPCM_BLOCK_BYTES;
-            echo substr($streamBuffer, 0, $sendBytes);
+            $audio = substr($streamBuffer, 0, $sendBytes);
+            echo $losslessClient ? radioLosslessFrame($audio) : $audio;
             $streamBuffer = substr($streamBuffer, $sendBytes);
             flush();
             continue;
         }
 
-        if (strlen($streamBuffer) >= ADPCM_BLOCK_BYTES) {
+        if (!$wiredClient && strlen($streamBuffer) >= ADPCM_BLOCK_BYTES) {
             $now = hrtime(true);
             if ($now < $nextSendAt) {
                 usleep((int) min(20000, max(1000, ($nextSendAt - $now) / 1000)));
@@ -237,6 +246,13 @@ try {
         $status = @proc_get_status($process);
         if ((!is_array($status) || !($status['running'] ?? false)) &&
             feof($pipes[1])) {
+            if ($losslessClient) {
+                $complete = intdiv(strlen($streamBuffer), ADPCM_BLOCK_BYTES) * ADPCM_BLOCK_BYTES;
+                if ($complete > 0) {
+                    echo radioLosslessFrame(substr($streamBuffer, 0, $complete));
+                    flush();
+                }
+            }
             break;
         }
         usleep(5000);

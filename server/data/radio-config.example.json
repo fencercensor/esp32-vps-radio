@@ -4,7 +4,7 @@
   "stations": [
     {
       "id": "cairo",
-      "name": "إذاعة القرآن الكريم من القاهرة",
+      "name": "Quran Radio Cairo",
       "enabled": true,
       "sources": [
         "http://stream.radiojar.com/8s5u5tpdtwzuv"
@@ -12,7 +12,7 @@
     },
     {
       "id": "roqiah",
-      "name": "الرقية الشرعية",
+      "name": "Ruqyah Shariah",
       "enabled": true,
       "sources": [
         "https://qurango.net/radio/roqiah"

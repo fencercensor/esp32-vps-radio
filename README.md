@@ -1,118 +1,79 @@
-# راديو إنترنت ESP32 ببوابة VPS
+# ESP32 VPS Radio
 
-مشروع راديو إنترنت سلكي مبني على لوحة **ESP32-WROOM-32 الكلاسيكية**. السيرفر يتعامل مع روابط المحطات وHLS وإعادة الاتصال والتحويل الصوتي، بينما يستقبل ESP32 بثًا خفيفًا ويخرجه ستيريو إلى مدخل AUX عبر الـDAC الداخلي على `GPIO25` و`GPIO26`.
+A wired AUX internet radio for the classic **ESP32-WROOM-32**, with a PHP/FFmpeg gateway for station management, source fallbacks and audio conversion. The ESP32 connects to a fixed origin IP over verified TLS, buffers encoded audio locally, and sends the same mono programme to both AUX channels through GPIO25 and GPIO26.
 
-> هذه النسخة سلكية بالكامل. البلوتوث غير مستخدم في مسار الراديو.
+## Features
 
-## صور التوصيل
+- Central management of up to 16 stations with ordered source fallbacks.
+- HTTPS certificate-chain and hostname verification, including TLS SNI when connecting to a numeric origin IP.
+- Optional **RZ1 lossless transport compression** that restores the original ADPCM bytes.
+- About 6.6 seconds of local audio buffering and controlled reconnects.
+- Up to five Wi-Fi networks configured locally and stored in NVS.
+- Previous, next and pause/resume buttons, saved station selection and volume control.
+- Download suspension after ten seconds at zero volume; live playback resumes when volume is raised.
+- English management and Wi-Fi setup interfaces.
 
-الصور التالية مأخوذة من ملف التوصيل الأصلي: [تحميل connection.pdf](docs/connection.pdf).
+Bluetooth and LCD support are not included in this wired firmware.
 
-### لوحة ESP32 المستخدمة
+## Audio and bandwidth
 
-![لوحة ESP32 المستخدمة](docs/images/connection-01-esp32.png)
+FFmpeg produces mono IMA-ADPCM at **14700 Hz**, with **1024-byte blocks**, without a gain boost. RZ1 groups up to eight blocks and uses zlib only when its payload is smaller. The device restores the exact original blocks before the existing decoder and DAC output.
 
-### الأزرار ومقاومة التحكم في الصوت
+Representative validation samples saved roughly 9-10% of audio transport bytes. Savings depend on the programme and exclude TCP/TLS overhead and other network usage. Raw fallback remains available when compression is not negotiated. Larger buffers alone do not reduce bandwidth.
 
-![توصيل الأزرار ومقاومة التحكم](docs/images/connection-02-controls.png)
+Short stalls can be absorbed by the buffer. An unavailable source or an outage longer than the available audio can still interrupt playback.
 
-### دائرة قناة الصوت اليمين
+## Quick start
 
-![دائرة قناة الصوت اليمين](docs/images/connection-03-right-channel.png)
+1. Follow the [wiring guide](docs/WIRING.md) with power disconnected.
+2. Configure HTTPS and install the [server files](docs/SERVER_SETUP.md), including a trusted FFmpeg executable.
+3. Copy `firmware/radio_config.example.h` to a private `radio_config.h`. Set your numeric origin IPv4, certificate hostname, root CA and unique setup password.
+4. Build with **Arduino ESP32 Core 3.3.11** and the board's matching partition scheme using the [firmware guide](docs/FIRMWARE_SETUP.md).
+5. Connect to `ESP-Radio-Setup`, open `http://192.168.4.1`, and save your 2.4 GHz Wi-Fi networks.
+6. Complete HTTPS admin setup at `/esp-radio/admin.php` and configure your station sources.
 
-### دائرة قناة الصوت الشمال
+## Hardware
 
-![دائرة قناة الصوت الشمال](docs/images/connection-04-left-channel.png)
+| Connection | Function |
+| --- | --- |
+| GPIO25 | AUX Left through its filter and coupling capacitor. |
+| GPIO26 | AUX Right through its filter and coupling capacitor. |
+| GPIO32 | Previous station button to Ground. |
+| GPIO33 | Pause/resume button to Ground. |
+| GPIO27 | Next station button to Ground. |
+| GPIO34 | Wiper of the 10 kOhm volume potentiometer. |
 
-### توصيل القناتين بسوكت AUX
+Use an active speaker's AUX input. Each channel has its own 1 kOhm resistor, 10 nF capacitor and 100 uF coupling capacitor. Full connections and polarity are in the wiring guide.
 
-![توصيل سوكت AUX](docs/images/connection-05-aux.png)
+![Buttons and volume control](docs/images/connection-02-controls.png)
 
-## ماذا يفعل المشروع؟
+[View the five wiring pages](docs/WIRING.md#reference-images) or [download the wiring PDF](docs/connection.pdf).
 
-- يدير المحطات وروابطها الاحتياطية من لوحة تحكم على السيرفر.
-- يجرّب روابط المحطة بالترتيب عند فشل أحدها.
-- يحوّل الصوت بواسطة FFmpeg إلى Mono IMA-ADPCM بتردد `14700 Hz` وبلوكات `1024` بايت.
-- يرسل الصوت إلى ESP32 عبر HTTP، ثم ينسخه إلى قناتي AUX الشمال واليمين.
-- يحتفظ ESP32 ببافر مضغوط يقارب 6.6 ثانية لتخفيف التقطيع القصير.
-- يدعم حتى خمس شبكات Wi-Fi محفوظة داخل ذاكرة الجهاز، بدون كتابة كلمات المرور داخل الكود.
-- يحفظ المحطة المختارة ويسترجعها بعد إعادة التشغيل.
-- يتحكم في الصوت بمقاومة متغيرة على `GPIO34`.
+## Repository layout
 
-الصوت الخارج من السيرفر **طبيعي بدون رفع `+3 dB` وبدون فلتر تضخيم**.
+| Path | Contents |
+| --- | --- |
+| `firmware/` | ESP32 application, ADPCM and lossless decoders, example settings. |
+| `server/` | Gateway, station manager, catalog APIs, health check and access rules. |
+| `docs/` | English firmware, server, wiring and transport guides. |
+| `tests/` | Synthetic lossless transport checks without deployment data. |
+| `scripts/security-check.sh` | Public-release privacy and secret checks. |
+| `SECURITY.md` | Private-file rules and deployment security notes. |
 
-## مسار الصوت
+## Requirements
 
-```text
-رابط المحطة
-   ↓
-VPS + FFmpeg + روابط احتياطية
-   ↓  HTTP / IMA-ADPCM
-ESP32 + بافر محلي
-   ↓
-GPIO25 → فلتر القناة الشمال → AUX L
-GPIO26 → فلتر القناة اليمين  → AUX R
-```
+- Classic ESP32 with internal DAC; ESP32-S3, C3 and C6 are incompatible with this output path.
+- Arduino ESP32 Core 3.3.11; no additional Arduino libraries.
+- PHP 8.1 or newer with `proc_open`; `gzcompress` enables lossless transport.
+- Apache or LiteSpeed with HTTPS, rewrite support and directory access rules.
+- FFmpeg suitable for the host, and hosting that allows long-lived listener processes.
 
-## محتويات المستودع
+## Privacy and validation
 
-- `firmware/`: كود ESP32 وفك ترميز IMA-ADPCM وملف إعداد نموذجي.
-- `server/`: بوابة البث ولوحة الإدارة وواجهات الإعداد والفحص.
-- `docs/WIRING_AR.md`: التوصيل الكامل خطوة بخطوة.
-- `docs/connection.pdf`: ملف صور التوصيل الأصلي المكوّن من خمس صفحات.
-- `docs/FIRMWARE_SETUP_AR.md`: تجهيز وبناء ورفع كود ESP32.
-- `docs/SERVER_SETUP_AR.md`: تثبيت ملفات السيرفر وFFmpeg ولوحة الإدارة.
-- `SECURITY.md`: قواعد الأمان والملفات التي يجب عدم نشرها.
+Only example configuration is published. Deployment addresses, private station catalogs, credentials, saved networks, logs, flash dumps, compiled firmware and server binaries are excluded. Public root CA certificates are trust anchors, not private credentials. See [SECURITY.md](SECURITY.md).
 
-## بدء سريع
+The firmware was built and exercised on a classic ESP32 with verified upload, lossless decoding, AUX playback and listener confirmation. This does not establish continuous uptime for every station. GitHub Actions validates public-file hygiene, PHP syntax and synthetic lossless round trips.
 
-1. اقرأ [توصيل الدائرة](docs/WIRING_AR.md) ونفّذ التوصيل والكهرباء مفصولة.
-2. جهّز السيرفر من [دليل السيرفر](docs/SERVER_SETUP_AR.md).
-3. انسخ `firmware/radio_config.example.h` إلى `firmware/radio_config.h` وأدخل بيانات خادمك وكلمة مرور إعداد Wi-Fi خاصة بك.
-4. ارفع البرنامج باتباع [دليل ESP32](docs/FIRMWARE_SETUP_AR.md).
-5. في أول تشغيل اتصل بشبكة `ESP-Radio-Setup` وأدخل شبكة Wi-Fi المنزلية.
-6. افتح لوحة الإدارة على مسار `/esp-radio/admin.php` وأضف محطاتك وروابطها.
+## License
 
-## التوصيلات الأساسية
-
-- `GPIO25`: قناة AUX الشمال.
-- `GPIO26`: قناة AUX اليمين.
-- `GPIO27`: المحطة التالية.
-- `GPIO32`: المحطة السابقة.
-- `GPIO33`: تشغيل أو إيقاف مؤقت.
-- `GPIO34`: منتصف مقاومة التحكم في الصوت `10K`.
-
-كل زر يتصل بين الـGPIO المحدد و`GND` لأن الكود يستخدم `INPUT_PULLUP`.
-
-## متطلبات التشغيل
-
-### ESP32
-
-- ESP32-WROOM-32 الكلاسيكية، وليست S3 أو C3 أو C6.
-- Arduino IDE أو Arduino CLI.
-- حزمة لوحات Espressif ESP32 إصدار `2.0.17` للبناء الموثق.
-- لوحة `ESP32 Dev Module` مع Flash بحجم 4MB.
-
-### السيرفر
-
-- Apache أو LiteSpeed مع PHP 8 تقريبًا.
-- السماح بدالة `proc_open`.
-- FFmpeg Linux x86-64 قابل للتنفيذ في `server/bin/ffmpeg`.
-- استضافة تسمح باتصالات طويلة وعمليات FFmpeg أثناء وجود مستمع.
-
-## ملاحظات مهمة
-
-- ملف `firmware/radio_config.h` خاص بجهازك وممنوع رفعه إلى GitHub؛ المستودع يتجاهله تلقائيًا.
-- ملف `server/data/admin.json` يحتوي Hash كلمة مرور لوحة الإدارة ولا يُنشر.
-- ملف `server/data/radio-config.json` هو حالة التشغيل الفعلية وقد يحتوي روابط خاصة؛ استخدم الملف النموذجي بدلًا منه.
-- ملف FFmpeg التنفيذي غير مرفق لتجنب نشر Binary ضخم وغير موثّق داخل المستودع.
-- روابط المحطات العامة أمثلة فقط، وقد تتغير أو تتوقف خارج سيطرة المشروع.
-- شاشة LCD 16×2 غير مضافة إلى البرنامج الموجود في هذا الإصدار.
-
-## الأمان
-
-المستودع مُجهّز بحيث لا يحتوي على كلمات مرور Wi-Fi أو cPanel أو SSH، مفاتيح خاصة، Hash لوحة الإدارة، عنوان خادم حقيقي أو سجلات تشغيل. راجع [SECURITY.md](SECURITY.md) قبل أي Fork أو نشر جديد.
-
-## الترخيص
-
-لم يُضف ترخيص مفتوح المصدر إلى هذا المستودع. تظل جميع الحقوق لصاحب المشروع ما لم يضف ترخيصًا لاحقًا.
+No open-source license has been granted. All rights remain with the project owner unless a license is added later.

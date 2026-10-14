@@ -20,5 +20,7 @@ echo json_encode([
     'sample_rate' => 14700,
     'channels' => 1,
     'block_size' => 1024,
+    'transports' => function_exists('gzcompress') ? ['raw', 'rz1'] : ['raw'],
+    'lossless_group_blocks' => 8,
     'stations' => $stations,
 ], JSON_UNESCAPED_SLASHES);

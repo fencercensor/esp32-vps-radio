@@ -4,11 +4,18 @@ declare(strict_types=1);
 require_once __DIR__ . '/config-store.php';
 
 $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+if (!$isHttps) {
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'HTTPS is required for admin access.';
+    exit;
+}
+ini_set('session.use_strict_mode', '1');
 session_name('esp_radio_admin');
 session_set_cookie_params([
     'lifetime' => 0,
     'path' => '/esp-radio/',
-    'secure' => $isHttps,
+    'secure' => true,
     'httponly' => true,
     'samesite' => 'Strict',
 ]);
@@ -32,7 +39,7 @@ function redirectAdmin(): never
 function ensureDataDirectory(): void
 {
     if (!is_dir(RADIO_DATA_DIR) && !@mkdir(RADIO_DATA_DIR, 0750, true) && !is_dir(RADIO_DATA_DIR)) {
-        throw new RuntimeException('تعذر إنشاء مجلد البيانات.');
+        throw new RuntimeException('Could not create the data directory.');
     }
 }
 
@@ -52,27 +59,27 @@ function validCsrf(): bool
 $adminExists = is_file(RADIO_ADMIN_FILE);
 $loggedIn = !empty($_SESSION['authenticated']);
 $error = '';
-$success = isset($_GET['saved']) ? 'تم حفظ التعديلات. ستصل إلى أجهزة ESP تلقائيًا.' : '';
+$success = isset($_GET['saved']) ? 'Settings saved. Devices refresh the catalog on their next stream connection.' : '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         if (!validCsrf()) {
-            throw new RuntimeException('انتهت الجلسة. أعد المحاولة.');
+            throw new RuntimeException('Session expired. Please try again.');
         }
         $action = (string) ($_POST['action'] ?? '');
         if ($action === 'setup' && !$adminExists) {
             $password = (string) ($_POST['password'] ?? '');
             $confirmation = (string) ($_POST['password_confirmation'] ?? '');
             if (strlen($password) < 10) {
-                throw new RuntimeException('اختر كلمة مرور لا تقل عن 10 أحرف.');
+                throw new RuntimeException('Choose a password with at least 10 characters.');
             }
             if (!hash_equals($password, $confirmation)) {
-                throw new RuntimeException('تأكيد كلمة المرور غير مطابق.');
+                throw new RuntimeException('Password confirmation does not match.');
             }
             ensureDataDirectory();
             $record = json_encode(['password_hash' => password_hash($password, PASSWORD_DEFAULT)]);
             if (!is_string($record) || @file_put_contents(RADIO_ADMIN_FILE, $record, LOCK_EX) === false) {
-                throw new RuntimeException('تعذر إنشاء حساب الإدارة.');
+                throw new RuntimeException('Could not create the admin account.');
             }
             @chmod(RADIO_ADMIN_FILE, 0640);
             $_SESSION['authenticated'] = true;
@@ -86,12 +93,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $attempts = (int) ($_SESSION['login_attempts'] ?? 0);
             $lastAttempt = (int) ($_SESSION['last_attempt'] ?? 0);
             if ($attempts >= 5 && time() - $lastAttempt < 60) {
-                throw new RuntimeException('محاولات كثيرة. انتظر دقيقة ثم حاول مرة أخرى.');
+                throw new RuntimeException('Too many attempts. Wait one minute and try again.');
             }
             if ($hash === '' || !password_verify((string) ($_POST['password'] ?? ''), $hash)) {
                 $_SESSION['login_attempts'] = $attempts + 1;
                 $_SESSION['last_attempt'] = time();
-                throw new RuntimeException('كلمة المرور غير صحيحة.');
+                throw new RuntimeException('Incorrect password.');
             }
             $_SESSION['login_attempts'] = 0;
             $_SESSION['authenticated'] = true;
@@ -106,13 +113,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'save' && $loggedIn) {
             $payload = json_decode((string) ($_POST['payload'] ?? ''), true);
             if (!is_array($payload)) {
-                throw new RuntimeException('بيانات الحفظ غير صحيحة.');
+                throw new RuntimeException('Invalid settings payload.');
             }
             saveRadioConfig($payload);
             header('Location: admin.php?saved=1');
             exit;
         }
-        throw new RuntimeException('الطلب غير مسموح.');
+        throw new RuntimeException('Request not allowed.');
     } catch (Throwable $exception) {
         $error = $exception->getMessage();
     }
@@ -123,11 +130,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $config = loadRadioConfig();
 $configJson = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?><!doctype html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>إدارة راديو ESP</title>
+  <title>ESP Radio Manager</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1220'/%3E%3Cpath d='M18 27h28v22H18zM22 15l23-7M25 38a7 7 0 1014 0 7 7 0 00-14 0z' fill='none' stroke='%2338bdf8' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='43' cy='33' r='2' fill='%2322c55e'/%3E%3C/svg%3E">
   <style>
     :root{color-scheme:dark;--bg:#070b12;--panel:#0d1523;--panel2:#111c2d;--line:#26354a;--text:#edf6ff;--muted:#9db0c6;--cyan:#38bdf8;--green:#22c55e;--red:#fb7185;--shadow:0 18px 50px #0007}
@@ -137,37 +144,37 @@ $configJson = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICO
 <body>
 <?php if (!$adminExists || !$loggedIn): ?>
   <main class="shell"><section class="panel login">
-    <div class="brand"><div class="mark">◉</div><div><h1>إدارة راديو ESP</h1><div class="sub">إعداد مركزي لكل الأجهزة</div></div></div>
+    <div class="brand"><div class="mark">◉</div><div><h1>ESP Radio Manager</h1><div class="sub">Central station settings for all devices</div></div></div>
     <?php if ($error !== ''): ?><div class="notice error"><?= h($error) ?></div><?php endif; ?>
     <?php if (!$adminExists): ?>
-      <p>أنشئ كلمة مرور الإدارة لأول مرة. لن تُحفظ إلا كقيمة مشفّرة.</p>
+      <p>Create an admin password. Only its hash is stored.</p>
       <form method="post">
         <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="setup">
-        <label class="field"><span>كلمة المرور الجديدة</span><input name="password" type="password" minlength="10" autocomplete="new-password" required></label>
-        <label class="field"><span>تأكيد كلمة المرور</span><input name="password_confirmation" type="password" minlength="10" autocomplete="new-password" required></label>
-        <button class="btn" type="submit">إنشاء لوحة التحكم</button>
+        <label class="field"><span>New password</span><input name="password" type="password" minlength="10" autocomplete="new-password" required></label>
+        <label class="field"><span>Confirm password</span><input name="password_confirmation" type="password" minlength="10" autocomplete="new-password" required></label>
+        <button class="btn" type="submit">Create admin account</button>
       </form>
     <?php else: ?>
       <form method="post">
         <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="login">
-        <label class="field"><span>كلمة المرور</span><input name="password" type="password" autocomplete="current-password" required autofocus></label>
-        <button class="btn" type="submit">دخول</button>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required autofocus></label>
+        <button class="btn" type="submit">Sign in</button>
       </form>
     <?php endif; ?>
   </section></main>
 <?php else: ?>
   <main class="shell">
-    <header class="top"><div class="brand"><div class="mark">◉</div><div><h1>إدارة راديو ESP</h1><div class="sub">الإصدار <?= (int) $config['version'] ?></div></div></div><form method="post"><input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="logout"><button class="btn secondary small">خروج</button></form></header>
+    <header class="top"><div class="brand"><div class="mark">◉</div><div><h1>ESP Radio Manager</h1><div class="sub">Version <?= (int) $config['version'] ?></div></div></div><form method="post"><input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="logout"><button class="btn secondary small">Sign out</button></form></header>
     <?php if ($error !== ''): ?><div class="notice error"><?= h($error) ?></div><?php endif; ?>
     <?php if ($success !== ''): ?><div class="notice success"><?= h($success) ?></div><?php endif; ?>
     <form method="post" id="config-form">
       <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="save"><input type="hidden" name="payload" id="payload">
       <section class="panel">
-        <div><div class="status"><i class="dot"></i><strong>الإعداد المركزي يعمل</strong></div><div class="hint">كل أجهزة ESP تسحب نفس قائمة المحطات تلقائيًا.</div></div>
+        <div><div class="status"><i class="dot"></i><strong>Central configuration is ready</strong></div><div class="hint">Devices use the same station catalog and refresh it when they connect.</div></div>
       </section>
-      <div class="toolbar"><h2>المحطات وروابط التشغيل</h2><button class="btn secondary" type="button" id="add-station">+ إضافة محطة</button></div>
+      <div class="toolbar"><h2>Stations and stream sources</h2><button class="btn secondary" type="button" id="add-station">+ Add station</button></div>
       <section class="stations" id="stations"></section>
-      <div class="footer-actions"><button class="btn" type="submit">حفظ وإرسال لكل الأجهزة</button><button class="btn secondary" type="button" id="reset-view">تراجع عن التعديلات</button></div>
+      <div class="footer-actions"><button class="btn" type="submit">Save station settings</button><button class="btn secondary" type="button" id="reset-view">Discard changes</button></div>
     </form>
   </main>
   <script>
@@ -176,20 +183,20 @@ $configJson = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICO
   const stationsNode = document.getElementById('stations');
   const esc = value => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   function render(){
-    stationsNode.innerHTML=state.stations.length?'':'<div class="empty">أضف محطة واحدة على الأقل.</div>';
+    stationsNode.innerHTML=state.stations.length?'':'<div class="empty">Add at least one station.</div>';
     state.stations.forEach((s,i)=>{
       const card=document.createElement('article');card.className='station';
-      card.innerHTML=`<div class="station-head"><div class="station-title">${esc(s.name||'محطة جديدة')}</div><div class="actions"><button type="button" class="btn secondary small" data-act="up">↑</button><button type="button" class="btn secondary small" data-act="down">↓</button><button type="button" class="btn danger small" data-act="delete">حذف</button></div></div><div class="station-grid"><div><label class="field"><span>اسم المحطة</span><input data-key="name" maxlength="60" value="${esc(s.name)}" required></label><label class="field"><span>المعرّف الإنجليزي</span><input data-key="id" maxlength="32" pattern="[a-z0-9][a-z0-9_-]{0,31}" value="${esc(s.id)}" required></label><label class="check"><input data-key="enabled" type="checkbox" ${s.enabled?'checked':''}> المحطة مفعّلة</label></div><label class="field" style="margin:0"><span>الروابط بالترتيب — رابط في كل سطر</span><textarea data-key="sources" required>${esc((s.sources||[]).join('\n'))}</textarea><span class="hint">إذا تعطل الرابط الأول يجرب السيرفر التالي تلقائيًا.</span></label></div>`;
-      card.querySelectorAll('[data-key]').forEach(el=>el.addEventListener('input',()=>{const k=el.dataset.key;s[k]=k==='enabled'?el.checked:k==='sources'?el.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):el.value;if(k==='name')card.querySelector('.station-title').textContent=el.value||'محطة جديدة'}));
-      card.querySelector('[data-act=delete]').onclick=()=>{if(confirm('حذف هذه المحطة؟')){state.stations.splice(i,1);render()}};
+      card.innerHTML=`<div class="station-head"><div class="station-title">${esc(s.name||'New station')}</div><div class="actions"><button type="button" class="btn secondary small" data-act="up">↑</button><button type="button" class="btn secondary small" data-act="down">↓</button><button type="button" class="btn danger small" data-act="delete">Delete</button></div></div><div class="station-grid"><div><label class="field"><span>Station name</span><input data-key="name" maxlength="60" value="${esc(s.name)}" required></label><label class="field"><span>Station ID</span><input data-key="id" maxlength="32" pattern="[a-z0-9][a-z0-9_-]{0,31}" value="${esc(s.id)}" required></label><label class="check"><input data-key="enabled" type="checkbox" ${s.enabled?'checked':''}> Station enabled</label></div><label class="field" style="margin:0"><span>Sources in order - one URL per line</span><textarea data-key="sources" required>${esc((s.sources||[]).join('\n'))}</textarea><span class="hint">If a source fails to start, the gateway tries the next URL.</span></label></div>`;
+      card.querySelectorAll('[data-key]').forEach(el=>el.addEventListener('input',()=>{const k=el.dataset.key;s[k]=k==='enabled'?el.checked:k==='sources'?el.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):el.value;if(k==='name')card.querySelector('.station-title').textContent=el.value||'New station'}));
+      card.querySelector('[data-act=delete]').onclick=()=>{if(confirm('Delete this station?')){state.stations.splice(i,1);render()}};
       card.querySelector('[data-act=up]').onclick=()=>{if(i>0){[state.stations[i-1],state.stations[i]]=[state.stations[i],state.stations[i-1]];render()}};
       card.querySelector('[data-act=down]').onclick=()=>{if(i<state.stations.length-1){[state.stations[i+1],state.stations[i]]=[state.stations[i],state.stations[i+1]];render()}};
       stationsNode.appendChild(card);
     });
   }
-  document.getElementById('add-station').onclick=()=>{state.stations.push({id:'station_'+(state.stations.length+1),name:'محطة جديدة',enabled:true,sources:['https://']});render();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})};
+  document.getElementById('add-station').onclick=()=>{state.stations.push({id:'station_'+(state.stations.length+1),name:'New station',enabled:true,sources:['https://']});render();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})};
   document.getElementById('reset-view').onclick=()=>{state=JSON.parse(JSON.stringify(original));render()};
-  document.getElementById('config-form').addEventListener('submit',e=>{if(!state.stations.length){e.preventDefault();alert('أضف محطة واحدة على الأقل.');return}document.getElementById('payload').value=JSON.stringify(state)});
+  document.getElementById('config-form').addEventListener('submit',e=>{if(!state.stations.length){e.preventDefault();alert('Add at least one station.');return}document.getElementById('payload').value=JSON.stringify(state)});
   render();
   </script>
 <?php endif; ?>

@@ -1,0 +1,8 @@
+Options -Indexes
+RewriteEngine On
+# Refuse unencrypted requests without embedding a deployment hostname.
+RewriteCond %{HTTPS} !=on
+RewriteRule ^ - [F,L]
+<FilesMatch "(?:^\.|\.(?:json|bak|log|tgz|zip)$)">
+    Require all denied
+</FilesMatch>

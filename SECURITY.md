@@ -1,45 +1,33 @@
-# الأمان والخصوصية
+# Security and privacy
 
-## ما لا يجب رفعه
+## Keep private
 
-الملفات التالية متجاهلة بواسطة `.gitignore` ويجب أن تظل خاصة:
+- `firmware/radio_config.h`: deployment IP, certificate hostname and setup password.
+- `server/data/admin.json`: admin password hash.
+- `server/data/radio-config.json`: live station catalog and any private or signed URLs.
+- `server/bin/ffmpeg`: separately obtained executable.
+- Build products, flash dumps, serial logs, backups and screenshots of private sessions.
 
-- `firmware/radio_config.h`: عنوان خادمك وكلمة مرور شبكة إعداد ESP32.
-- `server/data/admin.json`: Hash كلمة مرور لوحة الإدارة.
-- `server/data/radio-config.json`: إعداد التشغيل الفعلي وروابط المحطات الخاصة إن وجدت.
-- `server/bin/ffmpeg`: Binary خارجي يجب الحصول عليه من مصدر موثوق.
-- ملفات `*.bin` وملفات البناء والسجلات.
+Wi-Fi passwords are stored in NVS. A full flash dump can contain credentials even when source files do not. Publish neither flash dumps nor compiled firmware. Examples use a documentation-only IP and domain. The public root CA certificate is a trust anchor, not a secret or deployment certificate.
 
-كلمات مرور Wi-Fi لا توجد في المصدر؛ تُدخل من بوابة محلية وتحفظ داخل NVS على ESP32.
+## Transport and management
 
-## ما تمت إزالته من نسخة النشر
+The device connects to the configured numeric origin over HTTPS and validates its certificate chain and hostname. The domain is used for SNI and the HTTP Host header. There is no insecure mode or plaintext fallback; NTP sets the clock before certificate checks.
 
-- عناوين الخادم والحساب والمسارات الشخصية الحقيقية.
-- مفاتيح SSH وكلمات مرور الاستضافة والإدارة.
-- سجلات Serial ومعلومات الشبكة وRSSI.
-- ملفات BIN المبنية مسبقًا.
-- النسخ الاحتياطية وملفات النظام مثل `.DS_Store`.
-- رابط بث طويل يشبه الروابط الموقعة، واستُبدل بأمثلة عامة.
-- فلتر رفع الصوت `+3 dB` القديم.
-- بيانات المؤلف وCanva وتواريخ الإنشاء من Metadata ملف `docs/connection.pdf` المنشور، بدون تغيير صفحات التوصيل.
+RZ1 restores exact ADPCM bytes with bounded frame sizes and zlib checksum validation. Invalid frames end the connection. Raw fallback means uncompressed audio inside verified TLS, not unencrypted HTTP.
 
-## نموذج التهديد
+Admin access requires HTTPS, secure cookies, strict session mode, password hashing and CSRF checks. Web access rules deny HTTP and direct downloads of runtime data or FFmpeg. Configure redirects at the host with a trusted canonical domain instead of an arbitrary request Host header.
 
-- صفحة إعداد Wi-Fi متاحة فقط عند فتح وضع الإعداد محليًا. استخدم كلمة مرور AP فريدة، ولا تترك الجهاز في وضع الإعداد دون حاجة.
-- اتصال ESP32 بالبوابة في هذا الإصدار HTTP لأن عميل الصوت خفيف. لا ترسل عبر هذا المسار كلمات مرور أو Tokens؛ البروتوكول يحمل أسماء المحطات والصوت فقط.
-- لوحة الإدارة يجب أن تعمل عبر HTTPS وكلمة مرور قوية. يمكن إضافة حماية على مستوى الاستضافة أو تقييد IP كطبقة ثانية.
-- المستخدم المسجل في لوحة الإدارة يستطيع إدخال URL يجعل FFmpeg يجلبه من شبكة الخادم. لا تعطِ حساب الإدارة لأي شخص غير موثوق.
-- نشر المصدر لا يمنح حماية تلقائية للخادم؛ التحديثات والمراقبة والصلاحيات مسؤولية مشغل الخادم.
+Complete first-run admin setup before exposing it to untrusted visitors. An administrator can submit URLs that FFmpeg fetches from the server network; grant this access only to trusted operators. Keep PHP, FFmpeg and the operating system updated.
 
-## قبل كل Push
+The local Wi-Fi portal requires setup mode. Use a unique setup password and close setup mode when finished. Catalog APIs are public; they contain station information, not passwords or Wi-Fi credentials.
 
-1. شغّل `scripts/security-check.sh`.
-2. راجع `git status` و`git diff --cached` يدويًا.
-3. تأكد أن `radio_config.h` و`admin.json` و`radio-config.json` غير متتبعة.
-4. لا تعتمد على `.gitignore` وحده إذا كان الملف قد دخل تاريخ Git سابقًا.
+## Public-release checks
 
-إذا نُشر سر بالخطأ، احذفه من Git history وغيّر السر فورًا. حذف الملف في Commit جديد وحده لا يزيله من التاريخ.
+Run `bash scripts/security-check.sh`, inspect staged paths and review the staged diff before a push. The check rejects private runtime files, common secret patterns, personal absolute paths, non-example IP addresses and Arabic text in public source/documentation. Manually review free-form URLs and visual assets too.
 
-## الإبلاغ عن مشكلة أمنية
+Stage reviewed source and examples only. Do not copy an entire live deployment into Git. Use a GitHub noreply commit email if keeping your contact email private. Ignore rules do not remove secrets already present in history.
 
-لا تنشر كلمات مرور أو مفاتيح أو تفاصيل استغلال حساسة في Issue عامة. تواصل مع مالك المستودع بطريقة خاصة أولًا.
+If a credential is exposed, rotate it and remove it from history. Report security issues privately instead of posting passwords, keys or sensitive exploit details in public issues.
+
+The wiring PDF has a generic English title and no author, creator, dates or XMP metadata. Keep replacement asset metadata free of private identifiers.
